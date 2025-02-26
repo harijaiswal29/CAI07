@@ -1,0 +1,121 @@
+/* styles.css for Financial RAG Chatbot */
+
+/* Main container styling */
+.main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+/* Header styling */
+.header-container {
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+/* Chat message styling */
+.chat-message {
+    padding: 1.5rem;
+    border-radius: 0.5rem;
+    margin-bottom: 1.5rem;
+    animation: fadeIn 0.3s ease-in-out;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.chat-message.user {
+    background-color: #f0f2f6;
+    border-left: 5px solid #4a6fa5;
+}
+
+.chat-message.assistant {
+    background-color: #e6f3ff;
+    border-left: 5px solid #2e7d32;
+}
+
+/* Confidence score styling */
+.confidence-score {
+    margin-top: 0.5rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 0.3rem;
+    display: inline-block;
+    font-size: 0.9rem;
+}
+
+.confidence-high {
+    color: #2e7d32;
+    font-weight: bold;
+    background-color: rgba(46, 125, 50, 0.1);
+}
+
+.confidence-medium {
+    color: #ed6c02;
+    font-weight: bold;
+    background-color: rgba(237, 108, 2, 0.1);
+}
+
+.confidence-low {
+    color: #d32f2f;
+    font-weight: bold;
+    background-color: rgba(211, 47, 47, 0.1);
+}
+
+/* Button styling */
+.stButton button {
+    width: 100%;
+    padding: 0.5rem;
+    border-radius: 0.3rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.stButton button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Input field styling */
+input[type="text"] {
+    border-radius: 0.3rem;
+    padding: 0.8rem;
+    font-size: 1rem;
+}
+
+/* Source chunks styling */
+.source-chunk {
+    padding: 0.8rem;
+    background-color: #f9f9f9;
+    border-radius: 0.3rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    border-left: 3px solid #4a6fa5;
+}
+
+/* Animation */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Spinner styling */
+.loading-spinner {
+    text-align: center;
+    padding: 2rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .chat-message {
+        padding: 1rem;
+    }
+    
+    .main {
+        padding: 0.5rem;
+    }
+}
