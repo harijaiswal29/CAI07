@@ -142,7 +142,7 @@ class RAGSystem:
             min_length=30,
             num_beams=4,
             no_repeat_ngram_size=3,
-            temperature=0.7
+            #temperature=0.7
         )
         
         # Decode response
