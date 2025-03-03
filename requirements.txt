@@ -1,0 +1,19 @@
+streamlit==1.31.0
+# Fixed versions to ensure compatibility
+transformers==4.30.2
+sentence-transformers==2.2.2
+huggingface-hub==0.16.4
+faiss-cpu==1.7.4
+rank-bm25==0.2.2
+torch==2.0.1
+numpy==1.24.3
+scipy==1.10.1
+scikit-learn==1.2.2
+beautifulsoup4==4.12.2
+PyPDF2==3.0.1
+pdfplumber==0.10.2
+pandas==2.0.3
+python-docx==1.0.1
+# Add these for better compatibility
+protobuf==3.20.3
+pyyaml==6.0
