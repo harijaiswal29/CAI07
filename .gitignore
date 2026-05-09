@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Built artifacts (rebuild from source PDFs on first run)
+faiss_index
+chunks.pkl
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local plan / scratch
+.claude/

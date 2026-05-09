@@ -67,10 +67,12 @@ st.markdown("""
     .uploaded-file {
         padding: 0.5rem;
         background-color: #f0f8ff;
+        color: #1a1a1a;
         border-radius: 0.3rem;
         margin-bottom: 0.3rem;
         border-left: 3px solid #4a6fa5;
     }
+    .uploaded-file strong { color: #1a1a1a; }
     .progress-section {
         margin-top: 1rem;
         margin-bottom: 1rem;
@@ -91,8 +93,10 @@ st.markdown("""
         padding: 5px;
         border-radius: 4px;
         background-color: #f5f5f5;
+        color: #1a1a1a;
         margin-bottom: 4px;
     }
+    .method-tag { color: #1a1a1a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -133,7 +137,7 @@ def initialize_rag_system() -> RAGSystem:
         print("Initializing RAG system...")
         rag = RAGSystem(
             embedding_model_name='all-MiniLM-L6-v2',  # Small sentence transformer
-            llm_model_name='google/flan-t5-base',     # Small open-source LLM
+            llm_model_name='google/flan-t5-large',    # 770M params; ~3 GB on first download
             index_path='faiss_index', 
             chunks_path='chunks.pkl',
             enable_advanced_retrieval=False  # Default to false, will be toggled by UI
@@ -244,12 +248,7 @@ def format_method_tag(method: str) -> str:
 def display_chat_message(role: str, content: str, confidence: float = None, chunks: list = None, 
                          show_chunks: bool = False, params: dict = None, show_params: bool = False):
     """Display a formatted chat message with advanced features"""
-    message_class = "user" if role == "user" else "assistant"
-    
     with st.container():
-        st.markdown(f'<div class="chat-message {message_class}">', unsafe_allow_html=True)
-        
-        # Avatar and name
         if role == "user":
             st.markdown("### 👤 You:")
         else:
@@ -295,8 +294,6 @@ def display_chat_message(role: str, content: str, confidence: float = None, chun
                             st.markdown(f"*Merged from {chunk['merged_count']} chunks*")
                             
                         st.text(chunk['chunk'][:300] + "..." if len(chunk['chunk']) > 300 else chunk['chunk'])
-        
-        st.markdown('</div>', unsafe_allow_html=True)
 
 def display_uploaded_files(files: List):
     """Display the list of uploaded files with file info"""
@@ -592,7 +589,7 @@ def main():
         
         **Technical Details:**
         - Embedding: all-MiniLM-L6-v2
-        - Language Model: google/flan-t5-base
+        - Language Model: google/flan-t5-large
         - Guardrail: Input-side validation
         """)
 

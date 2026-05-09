@@ -335,23 +335,24 @@ class AdvancedRetrieval:
         try:
             from sentence_transformers import CrossEncoder
             
-            # Initialize cross-encoder model if not already loaded
+            # Initialize cross-encoder model if not already loaded.
+            # device='cpu' forces CPU even when WSL2 exposes a small integrated GPU —
+            # BGE reranker (~280 MB + activations) doesn't fit in 2 GiB GPU memory and
+            # would silently fall back to embedding ranking on every query.
             if not hasattr(self, 'cross_encoder'):
-                print("Loading cross-encoder model...")
-                # Use a small cross-encoder model compatible with our requirements
-                self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2')
+                print("Loading cross-encoder model (BAAI/bge-reranker-base)...")
+                self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device='cpu')
                 print("Cross-encoder loaded successfully")
-            
+
             # Prepare pairs for scoring (query + document pairs)
             pairs = [(query, chunk['chunk']) for chunk in retrieved_chunks]
-            
+
             # Score pairs with cross-encoder
             raw_scores = self.cross_encoder.predict(pairs)
-            
-            # Normalize scores to [0,1] range using sigmoid function
-            # This converts any real number to a value between 0 and 1
-            #normalized_scores = [1 / (1 + np.exp(-score)) for score in raw_scores]
-            normalized_scores = [1 / (1 + np.exp(-score * 2.0)) for score in raw_scores]
+
+            # Plain sigmoid — no logit sharpening (the *2.0 multiplier pushed weak matches
+            # close to 1.0 and made low-confidence answers look high-confidence).
+            normalized_scores = [1 / (1 + np.exp(-score)) for score in raw_scores]
             
             # Update scores and add original scores for reference
             for i, chunk in enumerate(retrieved_chunks):
@@ -403,9 +404,9 @@ class AdvancedRetrieval:
 
 
 class RAGSystem:
-    def __init__(self, 
+    def __init__(self,
                  embedding_model_name: str = 'all-MiniLM-L6-v2',
-                 llm_model_name: str = 'google/flan-t5-base',
+                 llm_model_name: str = 'google/flan-t5-large',
                  index_path: str = 'faiss_index',
                  chunks_path: str = 'chunks.pkl',
                  enable_advanced_retrieval: bool = False):
@@ -424,8 +425,9 @@ class RAGSystem:
         self.embedding_model = SentenceTransformer(embedding_model_name)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         
-        # Initialize language model and tokenizer
-        print("Loading language model...")
+        # Initialize language model and tokenizer.
+        # flan-t5-large is ~3 GB on first download; HuggingFace caches it after.
+        print(f"Loading language model ({llm_model_name})... first run downloads ~3 GB.")
         self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
         self.model = T5ForConditionalGeneration.from_pretrained(llm_model_name)
         
@@ -435,11 +437,14 @@ class RAGSystem:
         self.index = None
         self.chunks = None
         
-        # Create or load index
+        # Create or load index (IndexFlatIP + L2-normalized embeddings = cosine similarity)
         if self.index_path.exists() and self.chunks_path.exists():
             self.load_index()
         else:
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
+            self.index = faiss.IndexFlatIP(self.embedding_dim)
+
+        # Cross-encoder is lazy-loaded on first re-rank call
+        self.cross_encoder = None
             
         # Initialize advanced retrieval if enabled
         self.enable_advanced_retrieval = enable_advanced_retrieval
@@ -453,10 +458,11 @@ class RAGSystem:
                 self.enable_advanced_retrieval = False
     
     def embed_texts(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings for a list of texts"""
-        embeddings = self.embedding_model.encode(texts, 
+        """Generate L2-normalized embeddings (so inner product = cosine similarity)."""
+        embeddings = self.embedding_model.encode(texts,
                                                show_progress_bar=True,
-                                               convert_to_numpy=True)
+                                               convert_to_numpy=True,
+                                               normalize_embeddings=True)
         return embeddings
     
     def build_index(self, chunks: List[str]):
@@ -465,7 +471,7 @@ class RAGSystem:
         embeddings = self.embed_texts(chunks)
         
         print("Building FAISS index...")
-        self.index = faiss.IndexFlatL2(self.embedding_dim)
+        self.index = faiss.IndexFlatIP(self.embedding_dim)
         self.index.add(embeddings.astype('float32'))
         self.chunks = chunks
         
@@ -502,25 +508,61 @@ class RAGSystem:
         Returns:
             List of dictionaries containing chunks and their scores
         """
-        # Generate query embedding
+        # Generate query embedding (already L2-normalized)
         query_embedding = self.embed_texts([query])
-        
-        # Search index
-        distances, indices = self.index.search(query_embedding.astype('float32'), k)
-        
+
+        # Search index — IndexFlatIP returns cosine similarity (higher = better)
+        similarities, indices = self.index.search(query_embedding.astype('float32'), k)
+
         # Format results
         results = []
-        for i, (dist, idx) in enumerate(zip(distances[0], indices[0])):
+        for i, (sim, idx) in enumerate(zip(similarities[0], indices[0])):
             if idx != -1:  # Valid index
                 results.append({
                     'chunk': self.chunks[idx],
-                    'score': float(1 / (1 + dist)),  # Convert distance to similarity score
+                    'score': max(0.0, float(sim)),  # cosine similarity, clamped to [0, 1]
                     'rank': i + 1,
                     'method': 'embedding'
                 })
-        
+
         return results
     
+    def _rerank_with_cross_encoder(self, query: str, candidates: List[Dict[str, Any]],
+                                   top_k: int) -> List[Dict[str, Any]]:
+        """Re-rank candidates with a cross-encoder; score = sigmoid(CE logit) in [0, 1]."""
+        if not candidates:
+            return candidates
+        try:
+            if self.cross_encoder is None:
+                from sentence_transformers import CrossEncoder
+                print("Loading cross-encoder model (BAAI/bge-reranker-base)...")
+                # BGE reranker handles cross-domain financial queries far better than the
+                # ms-marco-MiniLM family, which scored "Provision for income taxes" passages
+                # at 1.0 against revenue queries because of shared surface vocabulary.
+                # device='cpu': WSL2's 2 GiB integrated GPU can't hold BGE + activations.
+                self.cross_encoder = CrossEncoder('BAAI/bge-reranker-base', device='cpu')
+
+            pairs = [(query, c['chunk']) for c in candidates]
+            raw_scores = self.cross_encoder.predict(pairs)
+
+            for c, raw in zip(candidates, raw_scores):
+                c['embedding_score'] = c.get('score')
+                c['raw_ce_score'] = float(raw)
+                # Sigmoid maps the CE logit to a calibrated [0, 1] relevance score.
+                c['score'] = float(1.0 / (1.0 + np.exp(-float(raw))))
+                c['method'] = c.get('method', 'embedding') + '_reranked'
+
+            reranked = sorted(candidates, key=lambda x: x['score'], reverse=True)[:top_k]
+            for i, c in enumerate(reranked):
+                c['rank'] = i + 1
+
+            top_score = reranked[0]['score'] if reranked else 0.0
+            print(f"Cross-encoder re-rank done. Top-1 score: {top_score:.3f}")
+            return reranked
+        except Exception as e:
+            print(f"Warning: cross-encoder re-rank failed ({e}); using embedding ranking.")
+            return candidates[:top_k]
+
     def generate_response(self, query: str, context: str) -> str:
         """
         Generate a response using the language model
@@ -532,19 +574,30 @@ class RAGSystem:
         Returns:
             Generated response
         """
-        # Prepare prompt
-        prompt = f"Context: {context}\n\nQuestion: {query}\n\nAnswer:"
+        # Instruction-style prompt: flan-t5 was trained to follow instructions, and an explicit
+        # "if not in context, say so" clause stops it from copying an unrelated chunk verbatim.
+        prompt = (
+            "Read the financial context and answer the question concisely using only facts from the context. "
+            "If the context does not contain the answer, reply exactly: "
+            "\"The answer is not in the provided documents.\"\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            "Answer:"
+        )
         
-        # Tokenize
-        inputs = self.tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
-        
-        # Generate
+        # flan-t5-large supports 1024 input tokens; give it room for more retrieved context.
+        inputs = self.tokenizer(prompt, return_tensors="pt", max_length=1024, truncation=True)
+
+        # max_new_tokens (not max_length) so the answer cap is independent of prompt length.
+        # num_beams=2 (was 4) keeps most answer quality while halving inference memory —
+        # critical on a 12 GB WSL2 budget where beam=4 OOM-killed the process.
         outputs = self.model.generate(
             inputs.input_ids,
-            max_length=150,
+            max_new_tokens=256,
             min_length=30,
-            num_beams=4,
+            num_beams=2,
             no_repeat_ngram_size=3,
+            early_stopping=True,
         )
         
         # Decode response
@@ -586,43 +639,20 @@ class RAGSystem:
                 k_values=[3, 5, 7]
             )
             
+            # Always finish with cross-encoder re-rank so confidence reflects true relevance.
+            # If adaptive_retrieval already reranked, this is a cheap re-score on the same chunks.
+            retrieved_chunks = self._rerank_with_cross_encoder(query, retrieved_chunks, top_k=len(retrieved_chunks))
+
             # Combine chunks for context
             context = "\n".join([chunk['chunk'] for chunk in retrieved_chunks])
-            
+
             # Generate response
             response = self.generate_response(query, context)
-            
-            # Calculate enhanced confidence score with safety checks
-            chunk_scores = [chunk['score'] for chunk in retrieved_chunks]
-            
-            # Ensure we have valid scores (between 0 and 1)
-            valid_scores = [score for score in chunk_scores if 0 <= score <= 1]
-            
-            # If we have no valid scores, default to 0.5
-            base_confidence = np.mean(valid_scores) if valid_scores else 0.5
-            
-            # Add bonuses for advanced techniques
-            method_bonus = 0.1 if any('hybrid' in str(chunk.get('method', '')) for chunk in retrieved_chunks) else 0
-            merged_bonus = 0.05 if params.get('merged', False) else 0
-            reranked_bonus = 0.05 if params.get('reranked', False) else 0
 
-            # Add these domain-specific bonuses:
-            # Financial term bonus
-            financial_terms = ['ratio', 'equity', 'debt', 'revenue', 'profit', 'margin', 'balance', 'asset', 'liability']
-            financial_term_bonus = 0.15 if any(term in query.lower() for term in financial_terms) else 0
+            # Confidence = top-1 cross-encoder score; no domain/method bonuses (they inflate scores
+            # without evidence the answer is actually relevant).
+            confidence_score = float(retrieved_chunks[0]['score']) if retrieved_chunks else 0.0
 
-            # Financial formula detection bonus
-            financial_formula_patterns = r'(debt[\s-]*to[\s-]*equity|profit\s*margin|roe|roi|eps|p\/e)'
-            formula_bonus = 0.2 if re.search(financial_formula_patterns, query.lower()) else 0
-
-            # Question sophistication bonus - reward more detailed questions
-            sophistication_bonus = min(0.1, len(query.split()) / 100)  # More words = more specific question
-            
-
-
-            # Calculate final confidence score with bounds check
-            confidence_score = min(0.99, max(0.01, base_confidence + method_bonus + merged_bonus + reranked_bonus))
-            
             print(f"Using method: Advanced (confidence: {confidence_score:.2f})")
             
             return {
@@ -656,22 +686,28 @@ class RAGSystem:
         if self.enable_advanced_retrieval and hasattr(self, 'advanced_retrieval'):
             return self.advanced_query(query, k)
             
-        # Original implementation for basic retrieval
-        print("Using method: Basic")
-        
-        # Retrieve relevant chunks
-        retrieved_chunks = self.retrieve(query, k)
-        
+        # Basic path: dense retrieval + always-on cross-encoder re-rank
+        print("Using method: Basic + cross-encoder re-rank")
+
+        # Over-fetch so the cross-encoder has more candidates to choose from
+        retrieval_k = max(k * 2, 10)
+        candidates = self.retrieve(query, retrieval_k)
+
+        retrieved_chunks = self._rerank_with_cross_encoder(query, candidates, top_k=k)
+
         # Combine chunks for context
         context = "\n".join([chunk['chunk'] for chunk in retrieved_chunks])
-        
+
         # Generate response
         response = self.generate_response(query, context)
-        
+
+        # Confidence = top-1 cross-encoder score (calibrated query-passage relevance)
+        confidence = float(retrieved_chunks[0]['score']) if retrieved_chunks else 0.0
+
         return {
             'response': response,
             'retrieved_chunks': retrieved_chunks,
-            'confidence_score': np.mean([chunk['score'] for chunk in retrieved_chunks])
+            'confidence_score': confidence,
         }
     
     # Add this new method to the RAGSystem class

@@ -10,6 +10,28 @@ from typing import List, Generator
 import re
 
 
+# Periods that are NOT sentence terminators — protected with <DOT> before splitting,
+# restored afterwards. Without this, "$309.1 billion" and "Alphabet Inc. The..." both
+# split mid-token and leave chunks like "1 billion for 2023..." that downstream T5 can't fix.
+_MULTI_DOT_ABBR_RE = re.compile(r'\b(U\.S|U\.K|e\.g|i\.e)\.')
+_SINGLE_DOT_ABBR_RE = re.compile(
+    r'\b(Inc|Corp|Ltd|Co|LLC|LLP|Plc|Mr|Mrs|Ms|Dr|Jr|Sr|St|No|vs|etc|Fig|Eq|Sec)\.'
+)
+_DECIMAL_RE = re.compile(r'(\d)\.(\d)')
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def _protect_periods(text: str) -> str:
+    text = _MULTI_DOT_ABBR_RE.sub(lambda m: m.group(1).replace('.', '<DOT>') + '<DOT>', text)
+    text = _SINGLE_DOT_ABBR_RE.sub(lambda m: m.group(1) + '<DOT>', text)
+    text = _DECIMAL_RE.sub(r'\1<DOT>\2', text)
+    return text
+
+
+def _restore_periods(text: str) -> str:
+    return text.replace('<DOT>', '.')
+
+
 class FinancialDataPreprocessor:
     """
     A class to preprocess financial statements for RAG implementation
@@ -39,7 +61,9 @@ class FinancialDataPreprocessor:
         file_ext = Path(file_path).suffix.lower()
         
         if file_ext == '.pdf':
-            return self._read_pdf(file_path)
+            # pdfplumber preserves word boundaries better than PyPDF2 — avoids
+            # "ca sh" / "increase s" artifacts that polluted earlier chunks.
+            return self._read_pdf_with_pdfplumber(file_path)
         elif file_ext == '.html':
             return self._read_html(file_path)
         elif file_ext in ['.doc', '.docx']:
@@ -185,70 +209,44 @@ class FinancialDataPreprocessor:
         return financial_data
 
     def create_chunks(self, text: str) -> List[str]:
-        """
-        Create overlapping chunks using batch processing for large texts
-        """
-        def split_into_sentences(text: str) -> Generator[str, None, None]:
-            """Split text into sentences efficiently"""
-            # Use regex to split on sentence boundaries
-            for match in re.finditer(r'[^.!?]+[.!?]+', text):
-                yield match.group().strip()
-        
-        def process_batch(sentences: List[str]) -> List[str]:
-            """Process a batch of sentences into chunks"""
-            batch_chunks = []
-            current_chunk = []
-            current_length = 0
-            
-            for sentence in sentences:
-                sentence_length = len(sentence)
-                
-                if current_length + sentence_length > self.chunk_size:
-                    if current_chunk:
-                        batch_chunks.append(' '.join(current_chunk))
-                        
-                        # Calculate overlap
-                        overlap_text = ' '.join(current_chunk[-2:])  # Keep last 2 sentences
-                        current_chunk = [overlap_text] if len(overlap_text) < self.chunk_overlap else []
-                        current_length = len(overlap_text) if current_chunk else 0
-                    else:
-                        current_chunk = []
-                        current_length = 0
-                
-                current_chunk.append(sentence)
-                current_length += sentence_length
-            
-            if current_chunk:
-                batch_chunks.append(' '.join(current_chunk))
-                
-            return batch_chunks
-        
-        # Process text in batches
-        BATCH_SIZE = 1000  # Number of sentences per batch
-        chunks = []
-        current_batch = []
-        processed_chars = 0
-        total_chars = len(text)
-        
-        print(f"\nProcessing text of length: {total_chars} characters")
-        
-        for sentence in split_into_sentences(text):
-            current_batch.append(sentence)
-            processed_chars += len(sentence)
-            
-            if len(current_batch) >= BATCH_SIZE:
-                batch_chunks = process_batch(current_batch)
-                chunks.extend(batch_chunks)
-                current_batch = []
-                
-                # Print progress
-                progress = (processed_chars / total_chars) * 100
-                print(f"Progress: {progress:.1f}% ({len(chunks)} chunks created)")
-        
-        # Process remaining sentences
-        if current_batch:
-            chunks.extend(process_batch(current_batch))
-        
+        """Sentence-aware chunking with real (non-discardable) overlap."""
+        protected = _protect_periods(text)
+        sentences = [
+            _restore_periods(s).strip()
+            for s in _SENTENCE_SPLIT_RE.split(protected)
+            if s.strip()
+        ]
+
+        print(f"\nProcessing text of length: {len(text)} characters ({len(sentences)} sentences)")
+
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+
+        for sentence in sentences:
+            sentence_len = len(sentence)
+
+            if current and current_len + sentence_len + 1 > self.chunk_size:
+                chunks.append(' '.join(current))
+
+                # Carry trailing sentences whose cumulative length first reaches chunk_overlap.
+                # Always keep at least the last sentence, even if it exceeds chunk_overlap on its own.
+                overlap: List[str] = []
+                overlap_len = 0
+                for s in reversed(current):
+                    overlap.insert(0, s)
+                    overlap_len += len(s) + 1
+                    if overlap_len >= self.chunk_overlap:
+                        break
+                current = overlap
+                current_len = sum(len(s) + 1 for s in current)
+
+            current.append(sentence)
+            current_len += sentence_len + 1
+
+        if current:
+            chunks.append(' '.join(current))
+
         print(f"Chunking completed! Created {len(chunks)} chunks")
         return chunks
 
